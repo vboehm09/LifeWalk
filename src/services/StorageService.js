@@ -10,7 +10,16 @@ export const StorageService = {
     return data ? JSON.parse(data) : null;
   },
 
-  async setOnboardingComplete() {  // ← SEM "d" no final
+  async saveStepGoal(goal) {
+    await AsyncStorage.setItem('@vivapassos_goal', String(goal));
+  },
+
+  async getStepGoal() {
+    const data = await AsyncStorage.getItem('@vivapassos_goal');
+    return data ? Number(data) : null;
+  },
+
+  async setOnboardingComplete() {
     await AsyncStorage.setItem('@vivapassos_onboarding', 'true');
   },
 
@@ -18,4 +27,16 @@ export const StorageService = {
     const value = await AsyncStorage.getItem('@vivapassos_onboarding');
     return value === 'true';
   },
+
+  async saveDailySteps(dateKey, steps) {
+  const raw = await AsyncStorage.getItem('@vivapassos_history');
+  const history = raw ? JSON.parse(raw) : {};
+  history[dateKey] = steps;
+  await AsyncStorage.setItem('@vivapassos_history', JSON.stringify(history));
+},
+
+async getHistory() {
+  const raw = await AsyncStorage.getItem('@vivapassos_history');
+  return raw ? JSON.parse(raw) : {};
+},
 };

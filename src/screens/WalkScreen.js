@@ -1,380 +1,370 @@
 import { useState, useEffect, useRef } from 'react';
 import {
-  View,
-  Text,
-  TouchableOpacity,
-  StyleSheet,
-  Alert,
-  StatusBar,
+    View,
+    Text,
+    TouchableOpacity,
+    StyleSheet,
+    Alert,
+    Platform,
 } from 'react-native';
 import { Pedometer } from 'expo-sensors';
 import { MaterialIcons } from '@expo/vector-icons';
-import { COLORS, METRICS, FONTS } from '../utils/constants';
+import { COLORS } from '../utils/constants';
+import { StorageService } from '../services/StorageService';
+
+const formatTime = (totalSeconds) => {
+    const h = Math.floor(totalSeconds / 3600);
+    const m = Math.floor((totalSeconds % 3600) / 60);
+    const s = totalSeconds % 60;
+    const mm = String(m).padStart(2, '0');
+    const ss = String(s).padStart(2, '0');
+    return h > 0 ? `${String(h).padStart(2, '0')}:${mm}:${ss}` : `${mm}:${ss}`;
+};
 
 export default function WalkScreen({ navigation }) {
-  const [steps, setSteps] = useState(0);
-  const [initialSteps, setInitialSteps] = useState(0);
-  const [elapsedTime, setElapsedTime] = useState(0); 
-  const [isPaused, setIsPaused] = useState(false);
-  const [isSensorActive, setIsSensorActive] = useState(false);
-  const timerRef = useRef(null);
-  const subscriptionRef = useRef(null);
+    const [steps, setSteps] = useState(0);
+    const [seconds, setSeconds] = useState(0);
+    const [isPaused, setIsPaused] = useState(false);
+    const [profile, setProfile] = useState(null);
 
-  useEffect(() => {
-    startWorkout();
+    const stepsRef = useRef(0); // total atual de passos do treino
+    const accumulatedRef = useRef(0); // passos de trechos anteriores (antes de pausar)
+    const segmentStartRef = useRef(new Date());
+    const pollRef = useRef(null);
+    const subscriptionRef = useRef(null);
 
-    return () => {
-      stopTimer();
-      unsubscribePedometer();
-    };
-  }, []);
+    // Carrega o perfil (para calcular a distância)
+    useEffect(() => {
+        const loadProfile = async () => {
+            try {
+                const saved = await StorageService.getProfile();
+                if (saved) setProfile(saved);
+            } catch (e) {
+                console.error("Erro ao carregar perfil:", e);
+            }
+        };
+        loadProfile();
+    }, []);
 
-  const startWorkout = async () => {
-    try {
-      const isAvailable = await Pedometer.isAvailableAsync();
-      if (!isAvailable) {
-        Alert.alert('Erro', 'Sensor de passos não disponível.');
-        navigation.goBack();
-        return;
-      }
+    // Cronômetro
+    useEffect(() => {
+        if (isPaused) return;
+        const timer = setInterval(() => setSeconds((s) => s + 1), 1000);
+        return () => clearInterval(timer);
+    }, [isPaused]);
 
-      const pastStepCount = await Pedometer.getStepCountAsync(
-        new Date(Date.now() - 1000), 
-        new Date()
-      );
-      setInitialSteps(pastStepCount.steps || 0);
-      setSteps(pastStepCount.steps || 0);
-      setIsSensorActive(true);
+    // Contagem de passos (reinicia a cada pausa/retomada)
+    useEffect(() => {
+        if (isPaused) return;
 
-      startTimer();
+        let cancelled = false;
+        segmentStartRef.current = new Date();
 
-      subscriptionRef.current = Pedometer.watchStepCount((result) => {
+        const updateSteps = (segmentSteps) => {
+            if (cancelled) return;
+            const total = accumulatedRef.current + segmentSteps;
+            stepsRef.current = total;
+            setSteps(total);
+        };
+
+        const start = async () => {
+            try {
+                const available = await Pedometer.isAvailableAsync();
+                if (!available) {
+                    Alert.alert('Sensor indisponível', 'Este dispositivo não possui pedômetro.');
+                    return;
+                }
+
+                const { status } = await Pedometer.requestPermissionsAsync();
+                if (status !== 'granted') {
+                    Alert.alert('Permissão necessária', 'Permita o acesso ao movimento para contar os passos.');
+                    return;
+                }
+
+                if (Platform.OS === 'ios') {
+                    // iOS: consulta o total desde o início do trecho a cada 2 segundos
+                    const poll = async () => {
+                        try {
+                            const result = await Pedometer.getStepCountAsync(
+                                segmentStartRef.current,
+                                new Date()
+                            );
+                            updateSteps(result.steps);
+                        } catch (e) {
+                            console.error("Erro ao contar passos:", e);
+                        }
+                    };
+                    await poll();
+                    pollRef.current = setInterval(poll, 2000);
+                } else {
+                    // Android: usa a assinatura em tempo real
+                    subscriptionRef.current = Pedometer.watchStepCount((result) => {
+                        updateSteps(result.steps);
+                    });
+                }
+            } catch (error) {
+                console.error("Erro ao iniciar contagem:", error);
+            }
+        };
+
+        start();
+
+        return () => {
+            cancelled = true;
+            if (pollRef.current) {
+                clearInterval(pollRef.current);
+                pollRef.current = null;
+            }
+            if (subscriptionRef.current) {
+                subscriptionRef.current.remove();
+                subscriptionRef.current = null;
+            }
+        };
+    }, [isPaused]);
+
+    const togglePause = () => {
         if (!isPaused) {
-          setSteps(result.steps);
+            // Ao pausar, guarda o que já foi contado
+            accumulatedRef.current = stepsRef.current;
         }
-      });
-    } catch (error) {
-      console.error("Erro ao iniciar treino:", error);
-    }
-  };
+        setIsPaused((p) => !p);
+    };
 
-  const startTimer = () => {
-    timerRef.current = setInterval(() => {
-      if (!isPaused) {
-        setElapsedTime((prev) => prev + 1);
-      }
-    }, 1000);
-  };
+    const distanceKm = () => {
+        if (!profile || !profile.height) return '0.00';
+        const strideCm = profile.height * 0.415;
+        return ((steps * strideCm) / 100000).toFixed(2);
+    };
 
-  const stopTimer = () => {
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
-  };
+    const stepsPerMinute = () => {
+        if (seconds < 10) return 0;
+        return Math.round(steps / (seconds / 60));
+    };
 
-  const unsubscribePedometer = () => {
-    if (subscriptionRef.current) {
-      subscriptionRef.current.remove();
-      subscriptionRef.current = null;
-    }
-  };
+    const handleFinish = () => {
+        navigation.replace('WalkSummary', {
+            steps,
+            duration: seconds,
+            distance: distanceKm(),
+        });
+    };
 
-  const togglePause = () => {
-    setIsPaused(!isPaused);
-  };
+    const handleClose = () => {
+        Alert.alert(
+            'Cancelar caminhada?',
+            'O progresso deste treino será perdido.',
+            [
+                { text: 'Continuar', style: 'cancel' },
+                { text: 'Cancelar treino', style: 'destructive', onPress: () => navigation.goBack() },
+            ]
+        );
+    };
 
-  const handleFinish = () => {
-    stopTimer();
-    unsubscribePedometer();
+    return (
+        <View style={styles.container}>
 
-    const workoutSteps = Math.max(0, steps - initialSteps);
-    const distance = calculateDistance(workoutSteps);
-    const pace = calculatePace(workoutSteps, elapsedTime);
+            <View style={styles.header}>
+                <TouchableOpacity style={styles.closeButton} onPress={handleClose}>
+                    <MaterialIcons name="close" size={26} color="#FFFFFF" />
+                </TouchableOpacity>
+                <View style={styles.headerCenter}>
+                    <Text style={styles.headerTitle}>Caminhada ao Ar Livre</Text>
+                    <View style={styles.statusRow}>
+                        <View style={[styles.statusDot, isPaused && styles.statusDotPaused]} />
+                        <Text style={styles.statusText}>{isPaused ? 'Pausado' : 'Em andamento'}</Text>
+                    </View>
+                </View>
+                <View style={styles.headerSpacer} />
+            </View>
 
-    navigation.replace('WalkSummary', {
-      steps: workoutSteps,
-      duration: elapsedTime,
-      distance: distance,
-      pace: pace,
-    });
-  };
+            <View style={styles.main}>
+                <Text style={styles.durationLabel}>Duração do Treino</Text>
+                <Text style={styles.timer}>{formatTime(seconds)}</Text>
 
-  const handleCancel = () => {
-    Alert.alert(
-      'Cancelar Caminhada',
-      'Tem certeza que deseja cancelar? Os dados não serão salvos.',
-      [
-        { text: 'Continuar', style: 'cancel' },
-        {
-          text: 'Cancelar',
-          style: 'destructive',
-          onPress: () => {
-            stopTimer();
-            unsubscribePedometer();
-            navigation.goBack();
-          },
-        },
-      ]
+                <View style={styles.sensorBadge}>
+                    <MaterialIcons name="sensors" size={18} color="#14B8A6" />
+                    <Text style={styles.sensorText}>
+                        {isPaused ? 'Sensor em pausa' : 'Sensor Ativo • Detectando passos'}
+                    </Text>
+                </View>
+
+                <Text style={styles.stepsNumber}>{steps.toLocaleString('pt-BR')}</Text>
+                <Text style={styles.stepsLabel}>passos neste treino</Text>
+
+                <View style={styles.statsRow}>
+                    <View style={styles.statCard}>
+                        <MaterialIcons name="speed" size={28} color="#6366F1" />
+                        <Text style={styles.statValue}>{stepsPerMinute()}</Text>
+                        <Text style={styles.statLabel}>passos/min</Text>
+                    </View>
+                    <View style={styles.statCard}>
+                        <MaterialIcons name="route" size={28} color="#14B8A6" />
+                        <Text style={styles.statValue}>{distanceKm()} km</Text>
+                        <Text style={styles.statLabel}>distância</Text>
+                    </View>
+                </View>
+            </View>
+
+            <View style={styles.footer}>
+                <TouchableOpacity style={styles.pauseButton} onPress={togglePause} activeOpacity={0.8}>
+                    <MaterialIcons name={isPaused ? 'play-arrow' : 'pause'} size={24} color="#FFFFFF" />
+                    <Text style={styles.buttonText}>{isPaused ? 'Retomar' : 'Pausar'}</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity style={styles.finishButton} onPress={handleFinish} activeOpacity={0.8}>
+                    <MaterialIcons name="stop" size={24} color="#FFFFFF" />
+                    <Text style={styles.buttonText}>Encerrar</Text>
+                </TouchableOpacity>
+            </View>
+
+        </View>
     );
-  };
-
-  const calculateDistance = (workoutSteps) => {
-    const distanceMeters = workoutSteps * 0.7;
-    return (distanceMeters / 1000).toFixed(2); // em km
-  };
-
-  const calculatePace = (workoutSteps, seconds) => {
-    if (seconds === 0) return 0;
-    const minutes = seconds / 60;
-    return Math.round(workoutSteps / minutes);
-  };
-
-  const formatTime = (seconds) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
-
-  const workoutSteps = Math.max(0, steps - initialSteps);
-
-  return (
-    <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor={COLORS.neutral} />
-
-      <View style={styles.header}>
-        <TouchableOpacity onPress={handleCancel} style={styles.closeButton}>
-          <MaterialIcons name="close" size={24} color={COLORS.white} />
-        </TouchableOpacity>
-        
-        <View style={styles.headerCenter}>
-          <Text style={styles.headerTitle}>Caminhada ao Ar Livre</Text>
-          <View style={styles.statusBadge}>
-            <View style={[styles.statusDot, isPaused ? styles.paused : styles.active]} />
-            <Text style={styles.statusText}>
-              {isPaused ? 'Pausado' : 'Em andamento'}
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.placeholder} />
-      </View>
-
-      <View style={styles.content}>
-        
-        <View style={styles.timerContainer}>
-          <Text style={styles.timerLabel}>Duração do Treino</Text>
-          <Text style={styles.timerValue}>{formatTime(elapsedTime)}</Text>
-        </View>
-
-        {isSensorActive && !isPaused && (
-          <View style={styles.sensorBadge}>
-            <MaterialIcons name="sensors" size={16} color={COLORS.secondary} />
-            <Text style={styles.sensorText}>Sensor Ativo • Detectando passos</Text>
-          </View>
-        )}
-
-        <View style={styles.stepsContainer}>
-          <Text style={styles.stepsValue}>{workoutSteps.toLocaleString('pt-BR')}</Text>
-          <Text style={styles.stepsLabel}>passos neste treino</Text>
-        </View>
-
-        <View style={styles.metricsRow}>
-          <View style={styles.metricBox}>
-            <MaterialIcons name="speed" size={24} color={COLORS.tertiary} />
-            <Text style={styles.metricValue}>{calculatePace(workoutSteps, elapsedTime)}</Text>
-            <Text style={styles.metricLabel}>passos/min</Text>
-          </View>
-
-          <View style={styles.metricBox}>
-            <MaterialIcons name="route" size={24} color={COLORS.secondary} />
-            <Text style={styles.metricValue}>{calculateDistance(workoutSteps)} km</Text>
-            <Text style={styles.metricLabel}>distância</Text>
-          </View>
-        </View>
-
-      </View>
-
-      <View style={styles.footer}>
-        <TouchableOpacity 
-          style={[styles.button, styles.buttonPause]}
-          onPress={togglePause}
-          activeOpacity={0.8}
-        >
-          <MaterialIcons 
-            name={isPaused ? 'play-arrow' : 'pause'} 
-            size={24} 
-            color={COLORS.white} 
-          />
-          <Text style={styles.buttonText}>
-            {isPaused ? 'Retomar' : 'Pausar'}
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity 
-          style={[styles.button, styles.buttonFinish]}
-          onPress={handleFinish}
-          activeOpacity={0.8}
-        >
-          <MaterialIcons name="stop" size={24} color={COLORS.white} />
-          <Text style={styles.buttonText}>Encerrar</Text>
-        </TouchableOpacity>
-      </View>
-
-    </View>
-  );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.neutral, // Fundo escuro
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: METRICS.padding,
-    paddingTop: 50,
-  },
-  closeButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  headerCenter: {
-    alignItems: 'center',
-    flex: 1,
-  },
-  headerTitle: {
-    color: COLORS.white,
-    fontSize: FONTS.sizes.md,
-    fontWeight: FONTS.weights.semibold,
-  },
-  statusBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 4,
-  },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    marginRight: 6,
-  },
-  active: {
-    backgroundColor: COLORS.secondary,
-  },
-  paused: {
-    backgroundColor: COLORS.warning,
-  },
-  statusText: {
-    color: COLORS.textLight,
-    fontSize: FONTS.sizes.xs,
-  },
-  placeholder: {
-    width: 40,
-  },
-  content: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: METRICS.paddingLg,
-  },
-  timerContainer: {
-    alignItems: 'center',
-    marginBottom: 24,
-  },
-  timerLabel: {
-    color: COLORS.textLight,
-    fontSize: FONTS.sizes.sm,
-    marginBottom: 8,
-  },
-  timerValue: {
-    color: COLORS.white,
-    fontSize: 56,
-    fontWeight: FONTS.weights.bold,
-    fontVariant: ['tabular-nums'], // Mantém os números alinhados
-  },
-  sensorBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(13, 148, 136, 0.15)',
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 20,
-    marginBottom: 32,
-  },
-  sensorText: {
-    color: COLORS.secondary,
-    fontSize: FONTS.sizes.xs,
-    fontWeight: FONTS.weights.medium,
-    marginLeft: 6,
-  },
-  stepsContainer: {
-    alignItems: 'center',
-    marginBottom: 40,
-  },
-  stepsValue: {
-    color: COLORS.white,
-    fontSize: 48,
-    fontWeight: FONTS.weights.bold,
-  },
-  stepsLabel: {
-    color: COLORS.textLight,
-    fontSize: FONTS.sizes.md,
-    marginTop: 4,
-  },
-  metricsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    width: '100%',
-  },
-  metricBox: {
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    padding: 20,
-    borderRadius: METRICS.borderRadius,
-    minWidth: 120,
-  },
-  metricValue: {
-    color: COLORS.white,
-    fontSize: FONTS.sizes.xl,
-    fontWeight: FONTS.weights.bold,
-    marginTop: 8,
-  },
-  metricLabel: {
-    color: COLORS.textLight,
-    fontSize: FONTS.sizes.xs,
-    marginTop: 4,
-  },
-  footer: {
-    flexDirection: 'row',
-    padding: METRICS.paddingLg,
-    paddingBottom: 40,
-    gap: 12,
-  },
-  button: {
-    flex: 1,
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 16,
-    borderRadius: METRICS.borderRadius,
-  },
-  buttonPause: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-  },
-  buttonFinish: {
-    backgroundColor: COLORS.error,
-  },
-  buttonText: {
-    color: COLORS.white,
-    fontSize: FONTS.sizes.md,
-    fontWeight: FONTS.weights.bold,
-    marginLeft: 8,
-  },
+    container: {
+        flex: 1,
+        backgroundColor: '#0F172A',
+        paddingHorizontal: 24,
+        paddingTop: 60,
+        paddingBottom: 40,
+    },
+    header: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+    },
+    closeButton: {
+        width: 48,
+        height: 48,
+        borderRadius: 24,
+        backgroundColor: '#1E293B',
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    headerCenter: {
+        flex: 1,
+        alignItems: 'center',
+    },
+    headerSpacer: {
+        width: 48,
+    },
+    headerTitle: {
+        color: '#FFFFFF',
+        fontSize: 18,
+        fontWeight: '600',
+    },
+    statusRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginTop: 4,
+    },
+    statusDot: {
+        width: 8,
+        height: 8,
+        borderRadius: 4,
+        backgroundColor: '#14B8A6',
+        marginRight: 6,
+    },
+    statusDotPaused: {
+        backgroundColor: '#F59E0B',
+    },
+    statusText: {
+        color: '#94A3B8',
+        fontSize: 14,
+    },
+    main: {
+        flex: 1,
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    durationLabel: {
+        color: '#94A3B8',
+        fontSize: 16,
+    },
+    timer: {
+        color: '#FFFFFF',
+        fontSize: 72,
+        fontWeight: 'bold',
+        marginVertical: 8,
+    },
+    sensorBadge: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: 'rgba(20, 184, 166, 0.12)',
+        paddingVertical: 8,
+        paddingHorizontal: 16,
+        borderRadius: 20,
+        marginBottom: 40,
+    },
+    sensorText: {
+        color: '#14B8A6',
+        fontSize: 14,
+        marginLeft: 8,
+    },
+    stepsNumber: {
+        color: '#FFFFFF',
+        fontSize: 64,
+        fontWeight: 'bold',
+    },
+    stepsLabel: {
+        color: '#94A3B8',
+        fontSize: 18,
+        marginBottom: 32,
+    },
+    statsRow: {
+        flexDirection: 'row',
+        justifyContent: 'center',
+        width: '100%',
+    },
+    statCard: {
+        flex: 1,
+        maxWidth: 170,
+        backgroundColor: '#1E293B',
+        borderRadius: 20,
+        paddingVertical: 20,
+        marginHorizontal: 8,
+        alignItems: 'center',
+    },
+    statValue: {
+        color: '#FFFFFF',
+        fontSize: 24,
+        fontWeight: 'bold',
+        marginTop: 8,
+    },
+    statLabel: {
+        color: '#94A3B8',
+        fontSize: 14,
+        marginTop: 4,
+    },
+    footer: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+    },
+    pauseButton: {
+        flex: 1,
+        flexDirection: 'row',
+        justifyContent: 'center',
+        alignItems: 'center',
+        backgroundColor: '#1E293B',
+        paddingVertical: 18,
+        borderRadius: 16,
+        marginRight: 8,
+    },
+    finishButton: {
+        flex: 1,
+        flexDirection: 'row',
+        justifyContent: 'center',
+        alignItems: 'center',
+        backgroundColor: '#EF4444',
+        paddingVertical: 18,
+        borderRadius: 16,
+        marginLeft: 8,
+    },
+    buttonText: {
+        color: '#FFFFFF',
+        fontSize: 18,
+        fontWeight: 'bold',
+        marginLeft: 8,
+    },
 });

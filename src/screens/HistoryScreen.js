@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import {
     View,
     Text,
@@ -7,17 +8,76 @@ import {
 } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { COLORS, METRICS, FONTS } from '../utils/constants';
+import { StorageService } from '../services/StorageService';
+import { Pedometer } from 'expo-sensors';
+
+const getStepsForDay = async (date) => {
+    const start = new Date(date);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(date);
+    end.setHours(23, 59, 59, 999);
+    const now = new Date();
+
+    const result = await Pedometer.getStepCountAsync(start, end > now ? now : end);
+    return result.steps;
+};
+
+const DAYS = [
+    { day: 'S', fullDay: 'Segunda' },
+    { day: 'T', fullDay: 'Terça' },
+    { day: 'Q', fullDay: 'Quarta' },
+    { day: 'Q', fullDay: 'Quinta' },
+    { day: 'S', fullDay: 'Sexta' },
+    { day: 'S', fullDay: 'Sábado' },
+    { day: 'D', fullDay: 'Domingo' },
+];
+
+// Data local no formato AAAA-MM-DD (mesmo formato usado na Home)
+const toDateKey = (date) => {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+};
+
+// Monta a semana atual (segunda a domingo) com os passos salvos
+const buildWeekData = (history) => {
+    const today = new Date();
+    const todayKey = toDateKey(today);
+    // getDay(): domingo = 0 ... sábado = 6 -> converte para segunda = 0 ... domingo = 6
+    const todayIndex = (today.getDay() + 6) % 7;
+
+    return DAYS.map((item, index) => {
+        const date = new Date(today);
+        date.setDate(today.getDate() - todayIndex + index);
+        const key = toDateKey(date);
+
+        return {
+            ...item,
+            steps: history[key] || 0,
+            isToday: key === todayKey,
+        };
+    });
+};
 
 export default function HistoryScreen({ navigation }) {
-    const weekData = [
-        { day: 'S', fullDay: 'Segunda', steps: 4500, isToday: false },
-        { day: 'T', fullDay: 'Terça', steps: 8200, isToday: false },
-        { day: 'Q', fullDay: 'Quarta', steps: 3100, isToday: false },
-        { day: 'Q', fullDay: 'Quinta', steps: 10500, isToday: false },
-        { day: 'S', fullDay: 'Sexta', steps: 7800, isToday: false },
-        { day: 'S', fullDay: 'Sábado', steps: 12000, isToday: false },
-        { day: 'D', fullDay: 'Domingo', steps: 6400, isToday: true }, // Dia atual
-    ];
+    const [weekData, setWeekData] = useState(buildWeekData({}));
+
+    useEffect(() => {
+        const loadHistory = async () => {
+            try {
+                const history = await StorageService.getHistory();
+                setWeekData(buildWeekData(history));
+            } catch (error) {
+                console.error("Erro ao carregar histórico:", error);
+            }
+        };
+
+        loadHistory();
+        // Recarrega sempre que a tela voltar a ficar em foco
+        const unsubscribe = navigation.addListener('focus', loadHistory);
+        return unsubscribe;
+    }, [navigation]);
 
     const totalSteps = weekData.reduce((acc, curr) => acc + curr.steps, 0);
     const averageSteps = Math.floor(totalSteps / 7);
