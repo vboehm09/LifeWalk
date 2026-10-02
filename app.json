@@ -18,13 +18,19 @@
       },
       "permissions": [
         "ACTIVITY_RECOGNITION"
-      ]
+      ],
+      "package": "com.boehm.LifeWalk"
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
       "expo-font"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "b8f763b6-13a6-48e3-be90-33e2e31f4342"
+      }
+    }
   }
 }
